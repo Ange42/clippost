@@ -8,7 +8,9 @@ Pour chaque vidéo, l'utilisateur voit le compte connecté (pseudo et avatar), l
 choisit qui peut voir (aucune valeur par défaut), les interactions (décochées par défaut, grisées si le
 créateur les a désactivées), la déclaration de contenu commercial, puis confirme. Rien n'est envoyé sans clic.
 """
+import hashlib
 import html
+import secrets as rnd
 import json
 import sys
 import threading
@@ -16,14 +18,16 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+sys.path.insert(0, str(Path.home() / "YouTube-Shorts"))  # uploader.py (dossier secrets)
 import tiktok
 
 COMPTE = sys.argv[1] if len(sys.argv) > 1 else ""
 DOSSIER = Path(sys.argv[2] if len(sys.argv) > 2 else ".").expanduser().resolve()
-PORT = int(sys.argv[3]) if len(sys.argv) > 3 else 8766
+PORT = int(sys.argv[3]) if len(sys.argv) > 3 else 8765  # = port du redirect_uri déclaré chez TikTok
 LIBELLES = {"PUBLIC_TO_EVERYONE": "Everyone", "MUTUAL_FOLLOW_FRIENDS": "Friends",
             "FOLLOWER_OF_CREATOR": "Followers", "SELF_ONLY": "Only me"}
 TACHES = {}  # publish en cours : nom -> état
+OAUTH = {}  # state -> code_verifier (connexion Login Kit en cours)
 
 CSS = """
 :root{--bg:#fafafa;--fg:#161616;--muted:#666;--card:#fff;--line:#e3e3e3;--accent:#fe2c55}
@@ -46,6 +50,17 @@ def page(titre, corps):
             f"<title>{html.escape(titre)}</title><style>{CSS}</style></head><body><main>{corps}</main></body></html>").encode()
 
 
+def connecte():
+    return tiktok.token_path(COMPTE).exists()
+
+
+def accueil_deconnecte():
+    return page("ClipPost", """<div class='top'><div><strong>ClipPost</strong><br><span class='muted'>No TikTok account connected</span></div></div>
+<div class='card'><p>Connect the TikTok account you want to post to. You will be asked to log in on TikTok and to approve ClipPost.</p>
+<p class='muted'>ClipPost reads your display name and avatar (user.info.basic) and posts only the videos you confirm (video.publish, video.upload).</p>
+<a href='/connect'><button type='button'>Connect with TikTok</button></a></div>""")
+
+
 def videos():
     return sorted(p.name for p in DOSSIER.glob("*.mp4"))
 
@@ -54,7 +69,7 @@ def entete(info):
     av = html.escape(info.get("creator_avatar_url", ""))
     nom = html.escape(info.get("creator_nickname") or info.get("creator_username") or COMPTE)
     return (f"<div class='top'><img src='{av}' alt=''><div><strong>ClipPost</strong><br>"
-            f"<span class='muted'>Posting to TikTok as <strong>{nom}</strong></span></div></div>")
+            f"<span class='muted'>Posting to TikTok as <strong>{nom}</strong> · <a href='/disconnect'>Disconnect</a></span></div></div>")
 
 
 def formulaire(nom, info):
@@ -137,6 +152,36 @@ class H(BaseHTTPRequestHandler):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
         nom = Path(q.get("f", [""])[0]).name
+        if u.path == "/connect":
+            cfg = tiktok.app()
+            verifier, state = rnd.token_urlsafe(64)[:64], rnd.token_urlsafe(16)
+            OAUTH[state] = verifier
+            url = tiktok.AUTH_URL + "?" + urllib.parse.urlencode({
+                "client_key": cfg["client_key"], "scope": tiktok.SCOPES, "response_type": "code",
+                "redirect_uri": cfg["redirect_uri"], "state": state,
+                "code_challenge": hashlib.sha256(verifier.encode()).hexdigest(), "code_challenge_method": "S256",
+                "disable_auto_auth": 1})
+            self.send_response(302)
+            self.send_header("Location", url)
+            return self.end_headers()
+        if u.path.rstrip("/") == "/callback":
+            state = q.get("state", [""])[0]
+            if state not in OAUTH or "code" not in q:
+                return self.envoyer(page("ClipPost", f"<p>Connection cancelled: {html.escape(q.get('error_description', q.get('error', ['?']))[0])}</p><p><a href='/'>Back</a></p>"), 400)
+            data = tiktok.appel_token({"grant_type": "authorization_code", "code": q["code"][0],
+                                       "redirect_uri": tiktok.app()["redirect_uri"], "code_verifier": OAUTH.pop(state)})
+            jeton = tiktok.sauver_jeton(COMPTE, data)
+            tiktok.log(f"AUTH (ClipPost) {COMPTE} (open_id {jeton['open_id']}, scopes {jeton['scope']})")
+            self.send_response(303)
+            self.send_header("Location", "/")
+            return self.end_headers()
+        if u.path == "/disconnect":
+            tiktok.token_path(COMPTE).unlink(missing_ok=True)
+            self.send_response(303)
+            self.send_header("Location", "/")
+            return self.end_headers()
+        if not connecte():
+            return self.envoyer(accueil_deconnecte())
         if u.path == "/":
             info = tiktok.infos_createur(COMPTE)
             items = "".join(f"<li><a href='/post?f={urllib.parse.quote(n)}'>{html.escape(n)}</a>"
