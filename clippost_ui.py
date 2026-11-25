@@ -46,7 +46,7 @@ button:disabled{opacity:.4;cursor:not-allowed}a{color:var(--accent)}ul.list li{m
 
 
 def page(titre, corps):
-    return (f"<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+    return (f"<!doctype html><html lang='en' translate='no'><head><meta charset='utf-8'><meta name='google' content='notranslate'><meta name='viewport' content='width=device-width,initial-scale=1'>"
             f"<title>{html.escape(titre)}</title><style>{CSS}</style></head><body><main>{corps}</main></body></html>").encode()
 
 
